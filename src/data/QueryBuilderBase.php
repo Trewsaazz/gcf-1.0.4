@@ -23,6 +23,8 @@ abstract class QueryBuilderBase implements QueryBuilderInterface
 
     protected ?Logger $logger;
 
+    public array $params = [];
+
     /**
      * @throws \Exception
      */
@@ -41,7 +43,13 @@ abstract class QueryBuilderBase implements QueryBuilderInterface
     protected function Execute(): SQLQuery
     {
         $q = new SQLQuery($this->configurador->db);
-        $q->PrepareQuery($this->PreparedQuery());
+        $sql = $this->PreparedQuery();
+        $q->PrepareQuery($sql, params: $this->params);
         return $q;
+    }
+
+    protected function getParams() : array {
+        return $this->params;
+
     }
 }

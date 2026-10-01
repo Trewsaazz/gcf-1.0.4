@@ -17,6 +17,8 @@ abstract class queryBase
 
     public string $query;
 
+    public array $params = [];
+
 	public function __construct(dataBaseConn $db)
 	{
 		$this->dataBase = $db;

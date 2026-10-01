@@ -71,10 +71,11 @@ class SQLQuery
         return $rowTypes;
     }
 
-    public function PrepareQuery(string $query, bool $assoc=true) : void
+    public function PrepareQuery(string $query, bool $assoc=true, ?array $params=null) : void
     {
         $this->consulta->assoc = $assoc;
         $this->consulta->query = $query;
+        $this->consulta->params = $params ?? [];
     }
 
     /**
@@ -84,9 +85,11 @@ class SQLQuery
      *
      * @throws errorQuerySQL
      */
-    public function fer_consulta(string $query, bool $assoc=false) : mixed
+    public function fer_consulta(string $query, bool $assoc=false, ?array $params=null) : mixed
     {
+        $params ??= [];
         $this->consulta->assoc = $assoc;
+        $this->consulta->params = $params;
         $resCons = null;
 
         if (isset($this->cache))
@@ -95,7 +98,7 @@ class SQLQuery
             if (preg_match("/^[ \n\r\t]*(select|SELECT).+(from|FROM)[ \n\r\t]*([a-zA-Z0-9_]+)[ \n\r\t]*/", $query, $queryParts)) {
                 $objectName = $queryParts[3];
             }
-            $this->firmaLastQuery = "QUERY:$objectName:".sha1($query);
+            $this->firmaLastQuery = "QUERY:$objectName:".sha1($query . ($params ? serialize($params) : ''));
             $cachedQuery = $this->cache->get($this->firmaLastQuery);
             if ($cachedQuery === false)
             {
@@ -128,7 +131,7 @@ class SQLQuery
     public function executa(bool $assoc=false) : mixed
     {
         if (isset($this->consulta))
-            return $this->fer_consulta($this->consulta->query, $assoc);
+            return $this->fer_consulta($this->consulta->query, $assoc, $this->consulta->params);
         return false;
     }
 

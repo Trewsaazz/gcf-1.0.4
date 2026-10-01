@@ -59,10 +59,11 @@ class QuerySQL extends queryBase
                   @ibase_free_result($this->result);
             }
 
+            $args = $this->params;
              if ($this->blobID)
-                 $this->result = @ibase_query($cnx, $this->query, $this->blobID);             
-             else
-                 $this->result = @ibase_query($cnx, $this->query);
+                 $args[] = $this->blobID;
+
+             $this->result = @ibase_query($cnx, $this->query, ...$args);
 
              if ($this->result === false)
              {
@@ -95,7 +96,7 @@ class QuerySQL extends queryBase
       final public function LastRecord() : int
       {
             $i=0;
-            $res = @ibase_query($this->connDb, $this->query);
+            $res = @ibase_query($this->connDb, $this->query, ...$this->params);
             while(@ibase_fetch_row($res))
                   $i++;
             ibase_free_result($res);
