@@ -33,6 +33,21 @@ abstract class DataMapper
      */
     public string $lastQuery;
 
+    /**
+     * Valors dels placeholders "?" de la darrera query
+     */
+    public array $lastParams = [];
+
+    /**
+     * Valors dels placeholders "?" generats per condPrimaryKey()
+     */
+    protected array $pkParams = [];
+
+    /**
+     * Columnes de cada taula ja consultades: [nomTaula => [NOM_MAJUSCULES => nom]]
+     */
+    private static array $columnsCache = [];
+
     public string $nomTaula;
 
     public ?ResultSet $result;
@@ -151,8 +166,45 @@ abstract class DataMapper
         $this->logger?->debug($msg);
     }
 
+    private function escriuLogQuery(string $query, array $params) : void
+    {
+        $this->escriuLog($query . " params: " .
+            json_encode($params, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE));
+    }
+
+    private function escriuLogDescartats() : void
+    {
+        if (!empty($this->converter->discardedFields))
+            $this->escriuLog("{$this->nomTaula}: camps descartats: " . implode(",", $this->converter->discardedFields));
+    }
+
     /**
-     * Metode que ens monta la condicio del where en cas de que la clau primaria sigui composta
+     * Torna les columnes de la taula com a [NOM_MAJUSCULES => nom]. Es consulta una sola vegada per taula.
+     * @return array
+     * @throws errorDriverDB
+     * @throws errorQuerySQL
+     */
+    public function getColumns() : array
+    {
+        if (isset(self::$columnsCache[$this->nomTaula]))
+            return self::$columnsCache[$this->nomTaula];
+
+        $columnes = [];
+        $cons = new SQLQuery($this->db);
+        $cons->fer_consulta("select * from {$this->nomTaula} where 1=0");
+        for ($i = 0; $i < $cons->NumFields(); $i++)
+        {
+            $nomCamp = $cons->NomField($i);
+            $columnes[strtoupper($nomCamp)] = $nomCamp;
+        }
+        $cons->tanca_consulta();
+
+        return self::$columnsCache[$this->nomTaula] = $columnes;
+    }
+
+    /**
+     * Metode que ens monta la condicio del where en cas de que la clau primaria sigui composta.
+     * La condició es genera amb placeholders "?" i els seus valors queden a getPkParams()
      * @param $ids
      * @return string SQL Condition for a PK
      * @throws noPrimaryKey
@@ -161,31 +213,63 @@ abstract class DataMapper
     {
         $cond = "";
         $i = 0;
+        $this->pkParams = [];
         if (is_array($this->primaryKey)) {
             $max = count($this->primaryKey);
             if (count($this->primaryKey) <> count($this->tipusPK))
                 throw new noPrimaryKey("No has definit tots els tipus de claus primaries");
 
             foreach ($this->primaryKey as $camp) {
-                $valorPK = $ids[$i];
-                if ($this->tipusPK[$i] == 'string')
-                    $valorPK = "'$valorPK'";
+                $this->pkParams[] = $ids[$i];
 
                 $i++;
 
                 if ($i == $max)
-                    $cond .= "$camp = $valorPK ";
+                    $cond .= "$camp = ? ";
                 else
-                    $cond .= "$camp = $valorPK and ";
+                    $cond .= "$camp = ? and ";
             }
         } else {
-            $valorPK = $ids;
-            if ($this->tipusPK == 'string')
-                $valorPK = "'$valorPK'";
-            $cond = "{$this->primaryKey} = $valorPK";
+            $this->pkParams[] = $ids;
+            $cond = "{$this->primaryKey} = ?";
         }
 
         return $cond;
+    }
+
+    public function getPkParams() : array
+    {
+        return $this->pkParams;
+    }
+
+    /**
+     * Condició de la PK amb els valors com a literals, per les sentències amb BLOB: el driver afegeix
+     * el blobID al final dels paràmetres i el where no pot tenir placeholders.
+     * @param $ids
+     * @return string SQL Condition for a PK
+     * @throws noPrimaryKey
+     */
+    private function condPrimaryKeyLiteral($ids): string
+    {
+        $camps = is_array($this->primaryKey) ? array_values($this->primaryKey) : [$this->primaryKey];
+        $tipus = is_array($this->primaryKey) ? array_values((array)$this->tipusPK) : [$this->tipusPK];
+        $valors = is_array($this->primaryKey) ? $ids : [$ids];
+
+        if (count($camps) <> count($tipus))
+            throw new noPrimaryKey("No has definit tots els tipus de claus primaries");
+
+        $cond = [];
+        foreach ($camps as $i => $camp) {
+            $valorPK = $valors[$i];
+            if ($tipus[$i] == 'string')
+                $valorPK = "'" . str_replace("'", "''", (string)$valorPK) . "'";
+            else if (!is_numeric($valorPK))
+                throw new noPrimaryKey("Valor de clau primaria incorrecte per $camp");
+
+            $cond[] = "$camp = $valorPK";
+        }
+
+        return implode(" and ", $cond);
     }
 
     public function PrimaryKey()
@@ -220,15 +304,17 @@ abstract class DataMapper
             throw new noDataFound("No hi ha dades d'entrada a cap camp de la taula");
 
         $this->lastQuery = $this->converter->ArrayToSQL(ConverterType::SQLInsert, $this->camps);
+        $this->lastParams = $this->converter->getParams();
 
-        $this->escriuLog($this->lastQuery);
+        $this->escriuLogDescartats();
+        $this->escriuLogQuery($this->lastQuery, $this->lastParams);
 
         try {
             $idTrans = null;
             if ($this->autoCommit)
                 $idTrans = $cons->iniciTrans();
 
-            $cons->fer_consulta($this->lastQuery);
+            $cons->fer_consulta($this->lastQuery, false, $this->lastParams);
 
             if ($this->autoCommit && $idTrans)
             {
@@ -256,7 +342,7 @@ abstract class DataMapper
     public function Modifica($id) : bool
     {
         // Sets where sentence to PK condition
-        $this->converter->Where($this->condPrimaryKey($id));
+        $this->converter->Where($this->condPrimaryKey($id), $this->pkParams);
 
         if (empty($this->camps))
         {
@@ -264,8 +350,10 @@ abstract class DataMapper
             return false;
         }
         $this->lastQuery = $this->converter->ArrayToSQL(ConverterType::SQLUpdate, $this->camps);
+        $this->lastParams = $this->converter->getParams();
 
-        $this->escriuLog($this->lastQuery);
+        $this->escriuLogDescartats();
+        $this->escriuLogQuery($this->lastQuery, $this->lastParams);
 
         $cons = new SQLQuery($this->db);
         try {
@@ -273,7 +361,7 @@ abstract class DataMapper
             if ($this->autoCommit)
                 $idTrans = $cons->iniciTrans();
 
-            $cons->fer_consulta($this->lastQuery);
+            $cons->fer_consulta($this->lastQuery, false, $this->lastParams);
 
             if ($this->autoCommit && $idTrans)
                 $cons->ferCommit($idTrans);
@@ -304,10 +392,13 @@ abstract class DataMapper
         }
 
         try {
-            $this->converter->Where($this->condPrimaryKey($id));
+            // El blobID el posa el driver com a darrer paràmetre, per això la PK va com a literal
+            $this->converter->Where($this->condPrimaryKeyLiteral($id));
             $this->lastQuery = $this->converter->ArrayToSQL(ConverterType::SQLUpdate, $this->camps);
-            $cons->fer_consulta($this->lastQuery);
-            $this->escriuLog($this->lastQuery);
+            $this->lastParams = $this->converter->getParams();
+            $this->escriuLogDescartats();
+            $cons->fer_consulta($this->lastQuery, false, $this->lastParams);
+            $this->escriuLogQuery($this->lastQuery, $this->lastParams);
             $cons->tanca_consulta();
         } catch (Exception $e) {
             $this->lastError = $cons->lastError();
@@ -332,11 +423,13 @@ abstract class DataMapper
     public function Carrega($id = '', $cond = '', $orderBy = '')
     {
         $cons = new SQLQuery($this->db);
+        $params = [];
 
         if (!$cond && $id)
         {
             try {
                 $cond = $this->condPrimaryKey($id);
+                $params = $this->pkParams;
             } catch (noPrimaryKey $e) {
                 $this->escriuLog($e->getMessage());
                 throw $e;
@@ -349,14 +442,14 @@ abstract class DataMapper
 
         try {
             if ($this->autoCommit) $cons->ferCommit();
-            $cons->fer_consulta($query, true);
+            $cons->fer_consulta($query, true, $params);
             $this->camps = [];
         } catch (errorQuerySQL $e) {
             $this->escriuLog($e->getMessage());
             throw $e;
         }
 
-        $this->escriuLog($query);
+        $this->escriuLogQuery($query, $params);
 
         if ($cons->Eof())
         {
@@ -379,6 +472,7 @@ abstract class DataMapper
         	}
 		}
   	    $this->lastQuery = $query;
+        $this->lastParams = $params;
         $this->result = new ResultSet($cons, $this->primaryKey); //, $this->BLOBLoad);
 
         return true;
@@ -416,9 +510,11 @@ abstract class DataMapper
     public function Borra($id, $unRegistre = true)
     {
         $where = '';
+        $params = [];
         if ($unRegistre) {
             try {
                 $where = "where " . $this->condPrimaryKey($id);
+                $params = $this->pkParams;
             } catch (noPrimaryKey $e) {
                 $this->escriuLog($e->getMessage());
                 throw $e;
@@ -431,8 +527,9 @@ abstract class DataMapper
             $idTrans = $cons->iniciTrans();
 
         $queryStr = "delete from {$this->nomTaula} " . $where;
-        $cons->fer_consulta($queryStr);
+        $cons->fer_consulta($queryStr, false, $params);
         $this->lastQuery = $queryStr;
+        $this->lastParams = $params;
 
         if ($this->autoCommit && $idTrans)
             $cons->ferCommit($idTrans);

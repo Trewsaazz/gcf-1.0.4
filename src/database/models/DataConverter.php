@@ -18,10 +18,23 @@ class DataConverter
     private string $tableName;
     private bool $swapDate;
     private ?string $generalWhere;
+    private array $whereParams = [];
+    private DataMapper $table;
     public array $dataFields;
+
+    /**
+     * Valors dels placeholders "?" de la darrera sentencia generada, en ordre
+     */
+    public array $params = [];
+
+    /**
+     * Camps de la darrera sentencia que no son columnes de la taula i s'han descartat
+     */
+    public array $discardedFields = [];
 
     public function __construct(DataMapper $table, bool $swapDate = true)
     {
+            $this->table = $table;
             $this->tableName = $table->nomTaula;
             $this->generalWhere = null;
             $this->dataFields = [];
@@ -64,10 +77,17 @@ class DataConverter
     /**
      * Adding additional where condition on final generated sentence
      * @param string|null $cond
+     * @param array $params Valors dels placeholders "?" de la condició
      */
-    public function Where(?string $cond) : void
+    public function Where(?string $cond, array $params = []) : void
     {
             $this->generalWhere = $cond;
+            $this->whereParams = $params;
+    }
+
+    public function getParams() : array
+    {
+        return $this->params;
     }
 
     /**
@@ -89,25 +109,35 @@ class DataConverter
      *
      * @param ConverterType $tipus Tipus d'operació a generar
      * @param array $camps Llista de camps i els seus valors
-     * @return string Sentencia SQL generada
+     * @return string Sentencia SQL generada amb placeholders "?", els valors es recullen a getParams()
+     * @throws noDataFound Si cap camp és una columna de la taula
      * @throws \Exception
      */
     public function ArrayToSQL(ConverterType $tipus, array $camps): string
     {
+        $this->params = [];
+        $this->discardedFields = [];
+
         $valorsCamps = [];
         $s_camps_db = [];
+        $assignacions = [];
+        $campBlob = null;
+        $columnes = $this->table->getColumns();
 
         foreach($camps as $nom_camp => $valor)
         {
-            $valor=str_replace("'", "''", $valor);
-            $valor=str_replace("\'", "''", $valor);
-
             if (empty($nom_camp))
                 continue;
 
-            $s_camps_db[] = $nom_camp;
+            // Els noms de camp no es poden parametritzar, només acceptam columnes reals de la taula
+            if (!isset($columnes[strtoupper($nom_camp)]))
+            {
+                $this->discardedFields[] = $nom_camp;
+                continue;
+            }
+            $nom_camp = $columnes[strtoupper($nom_camp)];
 
-            if (trim($valor)!=='')          // Use this comparsion instead empty because 0 values may confuse empty function
+            if (trim((string)$valor)!=='')          // Use this comparsion instead empty because 0 values may confuse empty function
             {
                 if($this->swapDate)
                 {
@@ -117,8 +147,7 @@ class DataConverter
                         if ($campData === false)
                             throw new \Exception("$data[1] Data incorrecte");
 
-                        $valorDataFmt = $campData->format(self::DEFAULT_DB_DATE_FMT);
-                        $valor = "'$valorDataFmt'";
+                        $valor = $campData->format(self::DEFAULT_DB_DATE_FMT);
                     } else {
                         if (preg_match("/^([0-9]{1,2}\/[0-9]{1,2}\/[0-9]{4}).([0-9]{1,2}:[0-9]{1,2}:[0-9]{1,2})$/", $valor, $dataHora))
                         {
@@ -127,17 +156,42 @@ class DataConverter
                                 throw new \Exception("$dataHora[1] Data incorrecte");
 
                             $valorDataFmt = $campData->format(self::DEFAULT_DB_DATE_FMT);
-			                $valor = "'$valorDataFmt $dataHora[2]'";
+			                $valor = "$valorDataFmt $dataHora[2]";
                         } else {
-                            if($valor!=='?')                // Si un camp te per valor un? és que li passam un blob
-                                $valor = "'".$valor."'";
+                            if($valor==='?')                // Si un camp te per valor un? és que li passam un blob
+                            {
+                                if ($campBlob !== null)
+                                    throw new \Exception("Només es pot guardar un BLOB per sentència");
+
+                                // El driver afegeix el blobID al final dels paràmetres, el seu "?" ha d'anar el darrer
+                                $campBlob = $nom_camp;
+                                continue;
+                            }
                         }
                     }
                 }
-                else $valor = "'".$valor."'";
+
+                $this->params[] = $valor;
+                $assignacions[] = [$nom_camp, "?"];
             }
             else
-                $valor = "null";
+                $assignacions[] = [$nom_camp, "null"];
+        }
+
+        if ($campBlob !== null)
+        {
+            if ($tipus === ConverterType::SQLUpdate && !empty($this->whereParams))
+                throw new \Exception("La condició d'un UPDATE amb BLOB no pot tenir paràmetres");
+
+            $assignacions[] = [$campBlob, "?"];
+        }
+
+        if (empty($assignacions))
+            throw new noDataFound("No hi ha cap camp vàlid per la taula $this->tableName");
+
+        foreach ($assignacions as [$nom_camp, $valor])
+        {
+            $s_camps_db[] = $nom_camp;
 
             if($tipus == ConverterType::SQLInsert) {
                 $valorsCamps[] = $valor;
@@ -145,6 +199,9 @@ class DataConverter
                 $valorsCamps[] = "$nom_camp = ".$valor;
             }
         }
+
+        if ($tipus === ConverterType::SQLUpdate)
+            $this->params = [...$this->params, ...$this->whereParams];
 
         $query = '';
         $s_camps_valors = implode(",",$valorsCamps);

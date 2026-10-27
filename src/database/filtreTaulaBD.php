@@ -84,12 +84,16 @@ class filtreTaulaBD
               $fieldsStr = implode(",",$this->fields);
 
           $where = "";
+          $params = [];
           if ($id)
+          {
               $where .=" ".$this->taula->condPrimaryKey($id);
+              $params = $this->taula->getPkParams();
+          }
 
           $qStr = "select $fieldsStr from {$this->taula->nomTaula} ".$this->joins." ".$where." ".$this->orderBy;
           $this->query = new SQLQuery($this->taula->getConnection());
-          $this->query->fer_consulta($qStr, $assoc=true);
+          $this->query->fer_consulta($qStr, $assoc=true, $params);
       }
 
       final public function get($id="")
